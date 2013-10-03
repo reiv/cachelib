@@ -192,7 +192,7 @@ class MQCache(Cache):
     Conference, General Track. 2001.
     """
 
-    def __init__(self, *args, m=2, q_out_size=10, **kwargs):
+    def __init__(self, *args, m=2, q_out_factor=4, **kwargs):
         """
         By default, `MQCache` uses two queues, making it similar in principle
         to 2Q.
@@ -218,7 +218,7 @@ class MQCache(Cache):
 
         # Eviction history.
         self._q_out = OrderedDict()
-        self._q_out_size = q_out_size
+        self._q_out_size = self.maxsize * q_out_factor
 
         # LRU queue stack.
         self._queues = [make_circular_queue(slots=4) for _ in range(m)]
