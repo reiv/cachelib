@@ -218,7 +218,7 @@ class MQCache(Cache):
 
         # Eviction history.
         self._q_out = OrderedDict()
-        self._q_out_size = self.maxsize * q_out_factor
+        self._q_out_size = int(self.maxsize * q_out_factor)
 
         # LRU queue stack.
         self._queues = [make_circular_queue(slots=4) for _ in range(m)]
@@ -354,4 +354,3 @@ class MQCache(Cache):
     def queue_num(self, access_count):
         import math
         return min(int(math.log(access_count, 2)), self.m - 1)
-
