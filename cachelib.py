@@ -268,7 +268,7 @@ class MQCache(Cache):
 
             else:
                 # Cache hit.
-                prev, next, _, value, access_count, _ = link
+                prev, next, _, value, access_count, _, _ = link
 
                 # Remove the link from its current location.
                 prev[LINK_NEXT] = next
@@ -295,6 +295,10 @@ class MQCache(Cache):
         self.adjust()
 
         return value
+
+    def __delitem__(self, key):
+        self._q_out.pop(key, None)
+        LRUCache.__delitem__(self, key)
 
 
     def evict(self):
