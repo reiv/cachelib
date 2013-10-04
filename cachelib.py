@@ -13,7 +13,9 @@ License: MIT
 import collections
 import threading
 
-from collections import deque, OrderedDict
+from collections import deque
+from collections import Counter
+from collections import OrderedDict
 
 # Linked list indexes
 LINK_PREV = 0
@@ -21,7 +23,8 @@ LINK_NEXT = 1
 LINK_KEY = 2
 LINK_VALUE = 3
 LINK_ACCESS_COUNT = 4
-LINK_EXPIRE_TIME = 5
+LINK_LAST_ACCESS_TIME = 5
+LINK_EXPIRE_TIME = 6
 
 def make_circular_queue(slots):
     root = []
@@ -199,7 +202,7 @@ class MQCache(Cache):
 
         The number of queues is determined by the adjustable parameter `m`.
 
-        :param m: Number of LRU queues. At least 2 and usually less than 10.
+        :param m: Number of LRU queues. At least 2 and usually fewer than 10.
         :param q_out_size: Number of items to keep in the eviction history.
         """
 
@@ -220,14 +223,21 @@ class MQCache(Cache):
         self._q_out = OrderedDict()
         self._q_out_size = int(self.maxsize * q_out_factor)
 
+        # Temporal distance statistics.
+        # Note: this only contains distances greater than maxsize.
+        #       (i.e. of previously evicted items)
+        self.temporal_distances = Counter()
+
         # LRU queue stack.
         self._queues = [make_circular_queue(slots=4) for _ in range(m)]
 
-        self.life_time = 10 # 10 accesses
+        self.life_time = self.maxsize
         self.current_time = 0
 
     def __getitem__(self, key):
         q_out = self._q_out
+        current_time = self.current_time
+
         with self._lock:
             try:
                 link = self._cache[key]
@@ -235,7 +245,7 @@ class MQCache(Cache):
                 # Cache miss.
 
                 if self.size < self.maxsize:
-                    link = [None] * 6
+                    link = [None] * 7
                     self.size += 1
                 else:
                     link = self.evict()
@@ -248,7 +258,13 @@ class MQCache(Cache):
                 link[LINK_VALUE] = value = self.get_missing(key)
                 link[LINK_KEY] = key
 
-                access_count = q_out.pop(key, 0)
+                try:
+                    access_count, last_access_time = q_out.pop(key)
+                except KeyError:
+                    access_count = 0
+                else:
+                    distance = current_time - last_access_time
+                    self.temporal_distances[distance] += 1
 
             else:
                 # Cache hit.
@@ -270,7 +286,8 @@ class MQCache(Cache):
             link[LINK_NEXT] = root
 
             link[LINK_ACCESS_COUNT] = access_count
-            link[LINK_EXPIRE_TIME] = self.current_time + self.life_time
+            link[LINK_LAST_ACCESS_TIME] = current_time
+            link[LINK_EXPIRE_TIME] = current_time + self.life_time
 
             # Store fast reference.
             self._cache[key] = link
@@ -294,6 +311,7 @@ class MQCache(Cache):
                 if link is not root:
                     key = link[LINK_KEY]
                     access_count = link[LINK_ACCESS_COUNT]
+                    last_access_time = link[LINK_LAST_ACCESS_TIME]
                     prev, next = link[LINK_PREV], link[LINK_NEXT]
 
                     # Remove the link.
@@ -307,8 +325,8 @@ class MQCache(Cache):
                     if len(q_out) >= self._q_out_size:
                         q_out.popitem(last=False) # FIFO
 
-                    # Remember key and access count.
-                    q_out[key] = access_count
+                    # Remember key, access count and last access time.
+                    q_out[key] = (access_count, last_access_time)
 
                     # Invoke callback.
                     on_evict = self.on_evict
@@ -354,3 +372,17 @@ class MQCache(Cache):
     def queue_num(self, access_count):
         import math
         return min(int(math.log(access_count, 2)), self.m - 1)
+
+    def peak_temporal_distance(self):
+        """
+        "[...] the peak temporal distance is defined as the temporal distance
+        that is greater than the number of cache blocks and that has the most
+        number of accesses." (Zhou 2001)
+
+        In theory, MQ performance improves as life_time approaches the peak
+        temporal distance.
+        """
+        try:
+            return self.temporal_distances.most_common(1)[0][0]
+        except IndexError:
+            return self.maxsize + 1
