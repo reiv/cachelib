@@ -22,14 +22,21 @@ LINK_PREV = 0
 LINK_NEXT = 1
 LINK_KEY = 2
 LINK_VALUE = 3
+
+# MQ-specific
 LINK_ACCESS_COUNT = 4
 LINK_LAST_ACCESS_TIME = 5
 LINK_EXPIRE_TIME = 6
+
+# ARC-specific
+LINK_LIST_TYPE = 4
+T1, T2, B1, B2 = 0, 1, 2, 3
 
 def make_circular_queue(slots):
     root = []
     root[:] = [root, root] + [None] * slots
     return root
+
 
 class Cache(collections.Mapping):
     def __init__(self, maxsize, get_missing=None, on_evict=None):
@@ -157,7 +164,7 @@ class LRUCache(Cache):
                 # Cache hit.
                 assert self._hit() or True
 
-                prev, next, _, value, _ = link
+                prev, next, _, value = link
 
                 # Remove the link from its current position.
                 prev[LINK_NEXT] = next
@@ -390,3 +397,128 @@ class MQCache(Cache):
             return self.temporal_distances.most_common(1)[0][0]
         except IndexError:
             return self.maxsize + 1
+
+
+class ARCache(Cache):
+    """
+    Adaptive Replacement Cache.
+
+    Warning: IBM patent!
+    """
+    def __init__(self, *args, **kwargs):
+        super(ARCCache, self).__init__(*args, **kwargs)
+        self._p = 0
+        self._t1 = t1 = make_circular_queue(slots=3)
+        self._t2 = t2 = make_circular_queue(slots=3)
+        self._b1 = b1 = make_circular_queue(slots=3)
+        self._b2 = b2 = make_circular_queue(slots=3)
+        self._b1_len = self._b2_len = 0
+
+    def __getitem__(self, key):
+        try:
+            link = self._cache[key]
+        except KeyError:
+            # Case IV: Key is not in T1, B1, T2 or B2.
+            root = None
+            replace = False
+
+            # Case A: T1 u B2 has exactly c pages.
+            if self._t1_len + self._b1_len == self.maxsize:
+                if self._b1_len != 0:
+                    # Delete LRU in B1.
+                    root = self._b1
+                    self._b1_len -= 1
+                    replace = True
+                else:
+                    # B1 is empty. Delete LRU in T1.
+                    root = self._t1
+                    self._t1_len -= 1
+
+            # Case B: T1 u B1 has less than c pages.
+            else:
+                total = (self._t1_len + self._t2_len +
+                         self._b1_len + self._b2_len)
+
+                if (total >= self.maxsize):
+                    if (total == 2 * self.maxsize):
+                        # Delete LRU in B2.
+                        root = self._b2
+                    replace = True
+
+            if root is not None:
+                lru = root[LINK_NEXT]
+                next = lru[LINK_NEXT]
+                lru[:] = ()
+                root[LINK_NEXT] = next
+                next[LINK_PREV] = root
+
+            if replace:
+                self.replace(key)
+
+        else:
+            prev, next, _, value, list_type = link
+
+            # Case I: Key is in T1 or T2.
+            if list_type is T1 or list_type is T2:
+                # Move key to MRU in T2.
+                root = self._t2
+                old_tail = root[LINK_PREV]
+                old_tail[LINK_NEXT] = root[LINK_PREV] = link
+                prev[LINK_NEXT] = next
+                next[LINK_PREV] = prev
+                link[LINK_PREV] = old_tail
+                link[LINK_NEXT] = root
+                return value
+
+            # Case II: key is in B1.
+            elif list_type is B1:
+                # Hit on ghost cache B1.
+                d1 = 1 if self._b1_len >= self._b2_len else (
+                    self._b2_len / self._b1_len)
+                self._p = min(self._p + d1, self.maxsize)
+                self.replace(key)
+
+            # Case III: key is in B2.
+            else:
+                # Hit on ghost cache B2.
+                d2 = 1 if self._b2_len >= self._b1_len else (
+                    self._b1_len / self._b2_len)
+                self.replace(key)
+
+            # Remove link from current list.
+            prev, next = link[LINK_PREV], link[LINK_NEXT]
+            prev[LINK_NEXT] = next
+            next[LINK_PREV] = prev
+
+    def replace(self, key, list_type):
+        t1_len = self._t1_len
+        p = self._p
+
+        if (t1_len and t1_len > p or
+            list_type is B2 and t1_len == p):
+            # Delete the LRU in T1.
+            root, target = self._t1, self._b1
+            self._t1_len -= 1
+            self._b1_len += 1
+        else:
+            # Delete the LRU in T2.
+            root, target = self._t2, self._b2
+            self._t2_len -= 1
+            self._b2_len += 1
+
+        with self._lock:
+            head = root[LINK_NEXT]
+
+            # Remove value from cache.
+            head[LINK_VALUE] = None
+
+            prev, next = head[LINK_PREV], head[LINK_NEXT]
+            prev[LINK_NEXT] = next
+            next[LINK_PREV] = prev
+
+            old_tail = target[LINK_PREV]
+            # Insert link at tail of queue (MRU).
+            old_tail[LINK_NEXT] = root[LINK_PREV] = link
+            link[LINK_PREV] = old_tail
+            link[LINK_NEXT] = root
+
