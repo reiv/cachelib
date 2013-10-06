@@ -510,6 +510,7 @@ class ARCache(Cache):
                 self._p = min(self._p + d1, maxsize)
                 self._replace(list_type)
                 self._b1_len -= 1
+                self._t2_len += 1
 
             # Case III: Key is in B2.
             elif list_type is B2:
@@ -519,17 +520,18 @@ class ARCache(Cache):
                 self._p = max(self._p - d2, 0)
                 self._replace(list_type)
                 self._b2_len -= 1
+                self._t2_len += 1
 
             # Case I: Key is in T1 or T2.
             else:
                 if list_type is T1:
                     self._t1_len -= 1
+                    self._t2_len += 1
                 assert self._hit() or True
 
             # Move to MRU of T2.
             _ll_move(link, self._t2[LINK_PREV])
             link[LINK_LIST_TYPE] = T2
-            self._t2_len += 1
 
         if value is None:
             link[LINK_VALUE] = value = self.get_missing(key)
