@@ -38,6 +38,26 @@ def make_circular_queue(slots):
     return root
 
 
+def _ll_move(link, target=None):
+    prev, next = link[LINK_PREV], link[LINK_NEXT]
+    if prev is not None:
+        prev[LINK_NEXT] = next
+    if next is not None:
+        next[LINK_PREV] = prev
+    if target is not None and target is not link:
+        prev, next = target[LINK_PREV], target[LINK_NEXT]
+        target[LINK_NEXT] = next[LINK_PREV] = link
+        link[LINK_PREV] = target
+        link[LINK_NEXT] = next
+
+def _ll_iter_keys(root):
+    link = root
+    while True:
+        link = link[LINK_PREV]
+        if link is root:
+            break
+        yield link[LINK_KEY]
+
 class Cache(collections.Mapping):
     def __init__(self, maxsize, get_missing=None, on_evict=None):
         self.maxsize = maxsize
@@ -47,7 +67,6 @@ class Cache(collections.Mapping):
         # Callback for item eviction.
         self.on_evict = on_evict
 
-        self.size = 0
         self.hits = self.misses = 0
 
         # Make linked list updates atomic.
@@ -120,6 +139,8 @@ class LRUCache(Cache):
 
         # Mapping of keys to links.
         self._cache = {}
+
+        self.size = 0
 
         # Cache consists of a doubly-linked list implementing a circular
         # queue with the following layout:
@@ -222,6 +243,7 @@ class MQCache(Cache):
             raise ValueError('m must be at least 2')
 
         self.m = m
+        self.size = 0
 
         # Fast lookup. (Key -> Link)
         self._cache = {}
@@ -401,124 +423,185 @@ class MQCache(Cache):
 
 class ARCache(Cache):
     """
-    Adaptive Replacement Cache.
+    Implementation of a cache using the ARC algorithm.
 
-    Warning: IBM patent!
+    Megiddo, Nimrod, and Dharmendra S. Modha. "ARC: A Self-Tuning, Low
+    Overhead Replacement Cache." FAST. Vol. 3. 2003.
     """
     def __init__(self, *args, **kwargs):
-        super(ARCCache, self).__init__(*args, **kwargs)
+        super(ARCache, self).__init__(*args, **kwargs)
+
+        self._cache = {}
+
         self._p = 0
         self._t1 = t1 = make_circular_queue(slots=3)
         self._t2 = t2 = make_circular_queue(slots=3)
         self._b1 = b1 = make_circular_queue(slots=3)
         self._b2 = b2 = make_circular_queue(slots=3)
+        self._t1_len = self._t2_len = 0
         self._b1_len = self._b2_len = 0
 
     def __getitem__(self, key):
+        t1_len = self._t1_len
+        t2_len = self._t2_len
+        b1_len = self._b1_len
+        b2_len = self._b2_len
+        maxsize = self.maxsize
+
         try:
             link = self._cache[key]
-        except KeyError:
-            # Case IV: Key is not in T1, B1, T2 or B2.
-            root = None
-            replace = False
 
-            # Case A: T1 u B2 has exactly c pages.
-            if self._t1_len + self._b1_len == self.maxsize:
-                if self._b1_len != 0:
+        # Case IV: Complete cache miss.
+        except KeyError:
+            assert self._miss() or True
+
+            value = None
+            self._cache[key] = link = [None, None, key, None, T1]
+
+            # Case A: T1 U B1 has `maxsize` items.
+            if t1_len + b1_len >= maxsize:
+                if b1_len:
                     # Delete LRU in B1.
-                    root = self._b1
+                    victim = self._b1[LINK_NEXT]
+                    assert victim is not self._b1
+                    _ll_move(victim)
                     self._b1_len -= 1
-                    replace = True
+                    self._replace(T1)
                 else:
-                    # B1 is empty. Delete LRU in T1.
-                    root = self._t1
+                    # Delete LRU in T1.
+                    victim = self._t1[LINK_NEXT]
+                    assert victim is not self._t1
+                    _ll_move(victim)
                     self._t1_len -= 1
 
-            # Case B: T1 u B1 has less than c pages.
+            # Case B: T1 U B1 has fewer than `maxsize` items.
             else:
-                total = (self._t1_len + self._t2_len +
-                         self._b1_len + self._b2_len)
-
-                if (total >= self.maxsize):
-                    if (total == 2 * self.maxsize):
+                total = t1_len + t2_len + b1_len + b2_len
+                victim = None
+                if total >= maxsize:
+                    if total == 2 * maxsize:
                         # Delete LRU in B2.
-                        root = self._b2
-                    replace = True
+                        victim = self._b2[LINK_NEXT]
+                        assert victim is not self._b2
+                        _ll_move(victim)
+                        self._b2_len -= 1
+                    self._replace(T1)
 
-            if root is not None:
-                lru = root[LINK_NEXT]
-                next = lru[LINK_NEXT]
-                lru[:] = ()
-                root[LINK_NEXT] = next
-                next[LINK_PREV] = root
+            if victim is not None:
+                victim_key = victim[LINK_KEY]
+                del self._cache[victim_key]
+                if self.on_evict is not None:
+                    self.on_evict(victim_key)
+                victim[:] = ()
 
-            if replace:
-                self.replace(key)
+            # Move new link to MRU of T1.
+            _ll_move(link, self._t1[LINK_PREV])
+            self._t1_len += 1
 
+        # Case I, II or III: Cache hit or ghost cache hit.
         else:
-            prev, next, _, value, list_type = link
+            value, list_type = link[LINK_VALUE], link[LINK_LIST_TYPE]
+
+            # Case II: Key is in B1.
+            if list_type is B1:
+                assert self._miss() or True
+                # Update p.
+                d1 = 1 if b1_len >= b2_len else b2_len / b1_len
+                self._p = min(self._p + d1, maxsize)
+                self._replace(list_type)
+                self._b1_len -= 1
+
+            # Case III: Key is in B2.
+            elif list_type is B2:
+                assert self._miss() or True
+                # Update p.
+                d2 = 1 if b2_len >= b1_len else b1_len / b2_len
+                self._p = max(self._p - d2, 0)
+                self._replace(list_type)
+                self._b2_len -= 1
 
             # Case I: Key is in T1 or T2.
-            if list_type is T1 or list_type is T2:
-                # Move key to MRU in T2.
-                root = self._t2
-                old_tail = root[LINK_PREV]
-                old_tail[LINK_NEXT] = root[LINK_PREV] = link
-                prev[LINK_NEXT] = next
-                next[LINK_PREV] = prev
-                link[LINK_PREV] = old_tail
-                link[LINK_NEXT] = root
-                return value
-
-            # Case II: key is in B1.
-            elif list_type is B1:
-                # Hit on ghost cache B1.
-                d1 = 1 if self._b1_len >= self._b2_len else (
-                    self._b2_len / self._b1_len)
-                self._p = min(self._p + d1, self.maxsize)
-                self.replace(key)
-
-            # Case III: key is in B2.
             else:
-                # Hit on ghost cache B2.
-                d2 = 1 if self._b2_len >= self._b1_len else (
-                    self._b1_len / self._b2_len)
-                self.replace(key)
+                if list_type is T1:
+                    self._t1_len -= 1
+                assert self._hit() or True
 
-            # Remove link from current list.
-            prev, next = link[LINK_PREV], link[LINK_NEXT]
-            prev[LINK_NEXT] = next
-            next[LINK_PREV] = prev
+            # Move to MRU of T2.
+            _ll_move(link, self._t2[LINK_PREV])
+            link[LINK_LIST_TYPE] = T2
+            self._t2_len += 1
 
-    def replace(self, key, list_type):
+        if value is None:
+            link[LINK_VALUE] = value = self.get_missing(key)
+
+        return value
+
+    def _replace(self, list_type):
         t1_len = self._t1_len
         p = self._p
 
-        if (t1_len and t1_len > p or
-            list_type is B2 and t1_len == p):
-            # Delete the LRU in T1.
-            root, target = self._t1, self._b1
+        if t1_len and (t1_len > p or
+            (list_type is B2 and t1_len == p)):
+            # Delete the LRU in T1, move to MRU of B1.
+            link, target = self._t1[LINK_NEXT], self._b1[LINK_PREV]
+            link[LINK_LIST_TYPE] = B1
             self._t1_len -= 1
             self._b1_len += 1
         else:
-            # Delete the LRU in T2.
-            root, target = self._t2, self._b2
+            # Delete the LRU in T2, move to MRU of B2.
+            link, target = self._t2[LINK_NEXT], self._b2[LINK_PREV]
+            link[LINK_LIST_TYPE] = B2
             self._t2_len -= 1
             self._b2_len += 1
 
         with self._lock:
-            head = root[LINK_NEXT]
+            # Remove reference to value.
+            link[LINK_VALUE] = None
+            _ll_move(link, target)
 
-            # Remove value from cache.
-            head[LINK_VALUE] = None
+        # This counts as an eviction, although the key remains in B1/B2.
+        if self.on_evict is not None:
+            self.on_evict(link[LINK_KEY])
 
-            prev, next = head[LINK_PREV], head[LINK_NEXT]
-            prev[LINK_NEXT] = next
-            next[LINK_PREV] = prev
+    def __delitem__(self, key):
+        link = self._cache[key]
+        list_type = link[LINK_LIST_TYPE]
+        if list_type is T1:
+            self._t1_len -= 1
+        elif list_type is T2:
+            self._t2_len -= 1
+        else:
+            # XXX: How should items in B1/B2 be handled, seeing as their
+            # values aren't actually cached? Attempting to delete them sounds
+            # like an error to me.
+            raise KeyError(key)
+        _ll_move(link)
 
-            old_tail = target[LINK_PREV]
-            # Insert link at tail of queue (MRU).
-            old_tail[LINK_NEXT] = root[LINK_PREV] = link
-            link[LINK_PREV] = old_tail
-            link[LINK_NEXT] = root
+    def __contains__(self, key):
+        try:
+            link = self._cache[key]
+        except KeyError:
+            return False
+        if link[LINK_LIST_TYPE] not in (T1, T2):
+            # XXX: See above.
+            return False
+        return True
 
+    @property
+    def size(self):
+        return self._t1_len + self._t2_len
+
+    @property
+    def t1(self): return _ll_iter_keys(self._t1)
+
+    @property
+    def t2(self): return _ll_iter_keys(self._t2)
+
+    @property
+    def b1(self): return _ll_iter_keys(self._b1)
+
+    @property
+    def b2(self): return _ll_iter_keys(self._b2)
+
+    @property
+    def p(self): return self._p
