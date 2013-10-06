@@ -32,9 +32,9 @@ LINK_EXPIRE_TIME = 6
 LINK_LIST_TYPE = 4
 T1, T2, B1, B2 = 0, 1, 2, 3
 
-def make_circular_queue(slots):
+def make_circular_queue():
     root = []
-    root[:] = [root, root] + [None] * slots
+    root[:] = [root, root]
     return root
 
 
@@ -147,7 +147,7 @@ class LRUCache(Cache):
         # <- (prev) (next) ->
         # ItemN (MRU) <-> root (empty) <-> Item0 (LRU), Item1 <-> ...
         # The order of items in the queue is the eviction order.
-        self._root = make_circular_queue(slots=3)
+        self._root = make_circular_queue()
 
     def __getitem__(self, key):
         root = self._root
@@ -258,7 +258,7 @@ class MQCache(Cache):
         self.temporal_distances = Counter()
 
         # LRU queue stack.
-        self._queues = [make_circular_queue(slots=4) for _ in range(m)]
+        self._queues = [make_circular_queue() for _ in range(m)]
 
         self.life_time = self.maxsize
         self.current_time = 0
@@ -434,10 +434,10 @@ class ARCache(Cache):
         self._cache = {}
 
         self._p = 0
-        self._t1 = t1 = make_circular_queue(slots=3)
-        self._t2 = t2 = make_circular_queue(slots=3)
-        self._b1 = b1 = make_circular_queue(slots=3)
-        self._b2 = b2 = make_circular_queue(slots=3)
+        self._t1 = t1 = make_circular_queue()
+        self._t2 = t2 = make_circular_queue()
+        self._b1 = b1 = make_circular_queue()
+        self._b2 = b2 = make_circular_queue()
         self._t1_len = self._t2_len = 0
         self._b1_len = self._b2_len = 0
 
