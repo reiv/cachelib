@@ -277,7 +277,7 @@ class MQCache(Cache):
                     link = [None] * 7
                     self.size += 1
                 else:
-                    link = self.evict()
+                    link = self._evict()
                     prev, next = link[LINK_PREV], link[LINK_NEXT]
 
                     # Remove the link from its current location.
@@ -321,7 +321,7 @@ class MQCache(Cache):
             # Store fast reference.
             self._cache[key] = link
 
-        self.adjust()
+            self._adjust()
 
         return value
 
@@ -330,76 +330,73 @@ class MQCache(Cache):
         LRUCache.__delitem__(self, key)
 
 
-    def evict(self):
+    def _evict(self):
         # Gotcha: it is the responsibility of the caller to remove or
         #         replace (potentially circular) references in the
         #         victim link's LINK_PREV and LINK_NEXT slots.
 
-        with self._lock:
-            # Get the first non-empty queue.
-            q_out = self._q_out
-            for k, root in enumerate(self._queues):
-                # Get victim from head (LRU).
-                link = root[LINK_NEXT]
-                if link is not root:
-                    key = link[LINK_KEY]
-                    access_count = link[LINK_ACCESS_COUNT]
-                    last_access_time = link[LINK_LAST_ACCESS_TIME]
-                    prev, next = link[LINK_PREV], link[LINK_NEXT]
+        # Get the first non-empty queue.
+        q_out = self._q_out
+        for k, root in enumerate(self._queues):
+            # Get victim from head (LRU).
+            link = root[LINK_NEXT]
+            if link is not root:
+                key = link[LINK_KEY]
+                access_count = link[LINK_ACCESS_COUNT]
+                last_access_time = link[LINK_LAST_ACCESS_TIME]
+                prev, next = link[LINK_PREV], link[LINK_NEXT]
 
-                    # Remove the link.
-                    prev[LINK_NEXT] = next[LINK_PREV]
-                    next[LINK_PREV] = prev[LINK_NEXT]
+                # Remove the link.
+                prev[LINK_NEXT] = next[LINK_PREV]
+                next[LINK_PREV] = prev[LINK_NEXT]
 
-                    # Remove victim reference from internal dict.
-                    del self._cache[key]
+                # Remove victim reference from internal dict.
+                del self._cache[key]
 
-                    # Pop eviction history if it's full.
-                    if len(q_out) >= self._q_out_size:
-                        q_out.popitem(last=False) # FIFO
+                # Pop eviction history if it's full.
+                if len(q_out) >= self._q_out_size:
+                    q_out.popitem(last=False) # FIFO
 
-                    # Remember key, access count and last access time.
-                    q_out[key] = (access_count, last_access_time)
+                # Remember key, access count and last access time.
+                q_out[key] = (access_count, last_access_time)
 
-                    # Invoke callback.
-                    on_evict = self.on_evict
-                    if on_evict is not None:
-                        on_evict(key, link[LINK_VALUE])
+                # Invoke callback.
+                on_evict = self.on_evict
+                if on_evict is not None:
+                    on_evict(key, link[LINK_VALUE])
 
-                    return link
+                return link
 
         raise KeyError('cache is empty')
 
 
-    def adjust(self):
+    def _adjust(self):
         # Intuition: This causes the head of each queue (except the first) to
         # 'age', possibly moving them to the tail end of a lower queue in the
         # stack. Without this, items with a high access count would linger in
         # the cache even after a drop in access frequency (a type of cache
         # pollution).
 
-        with self._lock:
+        self.current_time += 1
 
-            self.current_time += 1
+        for k in range(1, self.m):
+            root = self._queues[k]
+            link = root[LINK_NEXT]
 
-            for k in range(1, self.m):
-                root = self._queues[k]
-                link = root[LINK_NEXT]
+            if link is root:
+                # Queue is empty.
+                continue
 
-                if link is root:
-                    # Queue is empty.
-                    continue
+            if link[LINK_EXPIRE_TIME] < self.current_time:
+                # Demote item to tail of previous queue in stack.
+                root = self._queues[k-1]
+                old_tail = root[LINK_PREV]
+                old_tail[LINK_NEXT] = root[LINK_PREV] = link
+                link[LINK_PREV] = old_tail
+                link[LINK_NEXT] = root
 
-                if link[LINK_EXPIRE_TIME] < self.current_time:
-                    # Demote item to tail of previous queue in stack.
-                    root = self._queues[k-1]
-                    old_tail = root[LINK_PREV]
-                    old_tail[LINK_NEXT] = root[LINK_PREV] = link
-                    link[LINK_PREV] = old_tail
-                    link[LINK_NEXT] = root
-
-                    link[LINK_EXPIRE_TIME] = (
-                        self.current_time + self.life_time)
+                link[LINK_EXPIRE_TIME] = (
+                    self.current_time + self.life_time)
 
 
     def queue_num(self, access_count):
