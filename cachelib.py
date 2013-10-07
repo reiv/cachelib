@@ -448,93 +448,94 @@ class ARCache(Cache):
         b2_len = self._b2_len
         maxsize = self.maxsize
 
-        try:
-            link = self._cache[key]
+        with self._lock:
+            try:
+                link = self._cache[key]
 
-        # Case IV: Complete cache miss.
-        except KeyError:
-            assert self._miss() or True
+            # Case IV: Complete cache miss.
+            except KeyError:
+                assert self._miss() or True
 
-            value = None
-            self._cache[key] = link = [None, None, key, None, T1]
+                value = None
+                self._cache[key] = link = [None, None, key, None, T1]
 
-            # Case A: T1 U B1 has `maxsize` items.
-            if t1_len + b1_len >= maxsize:
-                if b1_len:
-                    # Delete LRU in B1.
-                    victim = self._b1[LINK_NEXT]
-                    assert victim is not self._b1
-                    _ll_move(victim)
-                    self._b1_len -= 1
-                    self._replace(T1)
-                else:
-                    # Delete LRU in T1.
-                    victim = self._t1[LINK_NEXT]
-                    assert victim is not self._t1
-                    _ll_move(victim)
-                    self._t1_len -= 1
-
-            # Case B: T1 U B1 has fewer than `maxsize` items.
-            else:
-                total = t1_len + t2_len + b1_len + b2_len
-                victim = None
-                if total >= maxsize:
-                    if total == 2 * maxsize:
-                        # Delete LRU in B2.
-                        victim = self._b2[LINK_NEXT]
-                        assert victim is not self._b2
+                # Case A: T1 U B1 has `maxsize` items.
+                if t1_len + b1_len >= maxsize:
+                    if b1_len:
+                        # Delete LRU in B1.
+                        victim = self._b1[LINK_NEXT]
+                        assert victim is not self._b1
                         _ll_move(victim)
-                        self._b2_len -= 1
-                    self._replace(T1)
+                        self._b1_len -= 1
+                        self._replace(T1)
+                    else:
+                        # Delete LRU in T1.
+                        victim = self._t1[LINK_NEXT]
+                        assert victim is not self._t1
+                        _ll_move(victim)
+                        self._t1_len -= 1
 
-            if victim is not None:
-                victim_key = victim[LINK_KEY]
-                del self._cache[victim_key]
-                if self.on_evict is not None:
-                    self.on_evict(victim_key)
-                victim[:] = ()
+                # Case B: T1 U B1 has fewer than `maxsize` items.
+                else:
+                    total = t1_len + t2_len + b1_len + b2_len
+                    victim = None
+                    if total >= maxsize:
+                        if total == 2 * maxsize:
+                            # Delete LRU in B2.
+                            victim = self._b2[LINK_NEXT]
+                            assert victim is not self._b2
+                            _ll_move(victim)
+                            self._b2_len -= 1
+                        self._replace(T1)
 
-            # Move new link to MRU of T1.
-            _ll_move(link, self._t1[LINK_PREV])
-            self._t1_len += 1
+                if victim is not None:
+                    victim_key = victim[LINK_KEY]
+                    del self._cache[victim_key]
+                    if self.on_evict is not None:
+                        self.on_evict(victim_key)
+                    victim[:] = ()
 
-        # Case I, II or III: Cache hit or ghost cache hit.
-        else:
-            value, list_type = link[LINK_VALUE], link[LINK_LIST_TYPE]
+                # Move new link to MRU of T1.
+                _ll_move(link, self._t1[LINK_PREV])
+                self._t1_len += 1
 
-            # Case II: Key is in B1.
-            if list_type is B1:
-                assert self._miss() or True
-                # Update p.
-                d1 = 1 if b1_len >= b2_len else b2_len / b1_len
-                self._p = min(self._p + d1, maxsize)
-                self._replace(list_type)
-                self._b1_len -= 1
-                self._t2_len += 1
-
-            # Case III: Key is in B2.
-            elif list_type is B2:
-                assert self._miss() or True
-                # Update p.
-                d2 = 1 if b2_len >= b1_len else b1_len / b2_len
-                self._p = max(self._p - d2, 0)
-                self._replace(list_type)
-                self._b2_len -= 1
-                self._t2_len += 1
-
-            # Case I: Key is in T1 or T2.
+            # Case I, II or III: Cache hit or ghost cache hit.
             else:
-                if list_type is T1:
-                    self._t1_len -= 1
+                value, list_type = link[LINK_VALUE], link[LINK_LIST_TYPE]
+
+                # Case II: Key is in B1.
+                if list_type is B1:
+                    assert self._miss() or True
+                    # Update p.
+                    d1 = 1 if b1_len >= b2_len else b2_len / b1_len
+                    self._p = min(self._p + d1, maxsize)
+                    self._replace(list_type)
+                    self._b1_len -= 1
                     self._t2_len += 1
-                assert self._hit() or True
 
-            # Move to MRU of T2.
-            _ll_move(link, self._t2[LINK_PREV])
-            link[LINK_LIST_TYPE] = T2
+                # Case III: Key is in B2.
+                elif list_type is B2:
+                    assert self._miss() or True
+                    # Update p.
+                    d2 = 1 if b2_len >= b1_len else b1_len / b2_len
+                    self._p = max(self._p - d2, 0)
+                    self._replace(list_type)
+                    self._b2_len -= 1
+                    self._t2_len += 1
 
-        if value is None:
-            link[LINK_VALUE] = value = self.get_missing(key)
+                # Case I: Key is in T1 or T2.
+                else:
+                    if list_type is T1:
+                        self._t1_len -= 1
+                        self._t2_len += 1
+                    assert self._hit() or True
+
+                # Move to MRU of T2.
+                _ll_move(link, self._t2[LINK_PREV])
+                link[LINK_LIST_TYPE] = T2
+
+            if value is None:
+                link[LINK_VALUE] = value = self.get_missing(key)
 
         return value
 
