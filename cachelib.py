@@ -260,7 +260,7 @@ class MQCache(Cache):
         # LRU queue stack.
         self._queues = [make_circular_queue() for _ in range(m)]
 
-        self.life_time = self.maxsize
+        self.life_time = self.peak_temporal_distance()
         self.current_time = 0
 
     def __getitem__(self, key):
