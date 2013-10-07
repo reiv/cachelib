@@ -3,6 +3,8 @@ cachelib
 
 ``cachelib`` is a Python library of caching algorithms.
 
+Compatibility: Python 3.3+
+
 Algorithms
 ----------
 
