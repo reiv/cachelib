@@ -564,18 +564,20 @@ class ARCache(Cache):
             self.on_evict(link[LINK_KEY])
 
     def __delitem__(self, key):
-        link = self._cache[key]
-        list_type = link[LINK_LIST_TYPE]
-        if list_type is T1:
-            self._t1_len -= 1
-        elif list_type is T2:
-            self._t2_len -= 1
-        else:
-            # XXX: How should items in B1/B2 be handled, seeing as their
-            # values aren't actually cached? Attempting to delete them sounds
-            # like an error to me.
-            raise KeyError(key)
-        _ll_move(link)
+        with self._lock:
+            link = self._cache[key]
+            list_type = link[LINK_LIST_TYPE]
+            if list_type is T1:
+                self._t1_len -= 1
+            elif list_type is T2:
+                self._t2_len -= 1
+            else:
+                # XXX: How should items in B1/B2 be handled, seeing as their
+                # values aren't actually cached? Attempting to delete them sounds
+                # like an error to me.
+                raise KeyError(key)
+            _ll_move(link)
+            del self._cache[key]
 
     def __contains__(self, key):
         try:
