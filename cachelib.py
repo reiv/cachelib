@@ -82,7 +82,7 @@ class Cache(collections.Mapping):
         raise NotImplementedError
 
     def __iter__(self):
-        return iter(self._cache)
+        raise NotImplementedError
 
     def __len__(self):
         return self._cache.__len__()
@@ -607,3 +607,7 @@ class ARCache(Cache):
 
     @property
     def p(self): return self._p
+
+    def __iter__(self):
+        yield from self.t2
+        yield from self.t1

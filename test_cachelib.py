@@ -7,6 +7,15 @@ from cachelib import ARCache
 def identity(x):
     return x
 
+@pytest.fixture
+def on_evict():
+    from collections import Counter
+    c = Counter()
+    def callback(key):
+        c[key] += 1
+    callback.count = c
+    return callback
+
 class TestARC:
     def test_arc(self):
         # Adapted from doctests in:
@@ -22,6 +31,12 @@ class TestARC:
         assert list(arc.b1) == [31, 30]
         assert list(arc.b2) == [38, 39, 19, 18, 15, 14, 13, 12]
         assert int(arc.p) == 5
+
+        assert 41 in arc
+        assert 32 in arc
+        assert 30 not in arc
+        assert 19 not in arc
+
         assert arc.size == 10
 
     def test_delitem(self):
@@ -40,3 +55,20 @@ class TestARC:
         del arc[11]
         assert arc.size == 0
 
+    def test_eviction(self, on_evict):
+        arc = ARCache(maxsize=10, get_missing=identity, on_evict=on_evict)
+        count = on_evict.count
+        for x in range(10):
+            arc[x]
+        for x in range(1, 10):
+            arc[x]
+        arc[11]
+        assert count[0] == 1
+        assert 0 not in arc
+        assert 1 in arc
+        arc[12]
+        assert 11 not in arc
+        assert count[11] == 1
+        del arc[8]
+        assert count[8] == 0
+        assert arc.size == 9
